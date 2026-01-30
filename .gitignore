@@ -1,0 +1,25 @@
+# PyCharm / IDE files
+.idea/
+*.iml
+*.iws
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Big folders you don't want in Git
+Dataset/
+Models/
+data/           # in case you create more
+*.parquet
+*.h5
+*.pth
+*.pickle
+*.joblib
+
+# Virtual environments (if you have one)
+venv/
+env/
+.env
