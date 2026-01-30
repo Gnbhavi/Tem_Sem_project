@@ -55,9 +55,9 @@ Format:
 
 Examples
 ```bash
-[Week 2] RMSE: finalized calculation and validation
-[Week 2] Model: optimized hyperparameters
-[Week 2] Streamlit: added results dashboard
+RMSE: finalized calculation and validation
+Model: optimized hyperparameters
+Streamlit: added results dashboard
 ```
 ---
 
