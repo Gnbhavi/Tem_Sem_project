@@ -10,3 +10,4 @@ This file tracks weekly progress, features completed, and milestones.
 - Added a git hook for "CHANGELOG"
 - THe hooks are added to automate my CHANGELOG.md file
 - Streamlit: Sample webpage design is done
+- Basic Model Creation: We have created a base model with resnet, its the base

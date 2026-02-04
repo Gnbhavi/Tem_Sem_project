@@ -188,12 +188,14 @@ for epoch in range(num_epochs):
 models_dir = "Models"
 os.makedirs(models_dir, exist_ok=True)
 
-timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H")
 model_filename = f"can_hold_model_{timestamp}.pth"
 model_path = os.path.join(models_dir, model_filename)
 
 torch.save(model.state_dict(), model_path)
 print(f"\nModel saved → {model_path}")
+
+print(model)
 
 # ────────────────────────────────────────────────
 # 8. Plot RMSE vs Epochs with shading + auto-save
