@@ -31,5 +31,5 @@ with tab2:
     st.subheader("RMSE")
     st.write("👉 Images go here (plots, charts, etc.)")
     # Example placeholder
-    st.image("Charts/Sample_RMSE.jpg", caption="RMSE over iterations", width=800)
+    st.image("Charts/rmse_vs_epochs_2026-02-01_16-23-36.png", caption="RMSE over iterations", width=800)
 
