@@ -1,20 +1,82 @@
 import os
-import datetime
+import cv2
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error
+from sklearn.metrics import accuracy_score, precision_score, recall_score, roc_auc_score
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
-import torchvision
-from torchvision import transforms, models
-import numpy as np
-import matplotlib.pyplot as plt
-import torch.nn.functional as F
-from sklearn.metrics import mean_squared_error
+from torch.utils.data import Dataset, DataLoader
+from torchvision import models, transforms
+from datetime import datetime
+from utils import (ROOT, DATASET_DIR, CAN_DIR, CANNOT_HOLD_DIR, CHART_DIR)
 
-# ────────────────────────────────────────────────
-# 1. Data transforms
-# ────────────────────────────────────────────────
+
+os.makedirs(CHART_DIR, exist_ok=True)
+current_date = datetime.now().strftime('%Y-%m-%d')
+
+# === Hu Moments Loader ===
+def load_images_and_compute_hu_moments(folder, label):
+    hu_moments_list, image_paths = [], []
+    for file in os.listdir(folder):
+        if file.lower().endswith('.tif'):
+            img_path = os.path.join(folder, file)
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                print(f"Warning: Could not load {img_path}")
+                continue
+            moments = cv2.moments(img)
+            hu_moments = cv2.HuMoments(moments).flatten()
+            hu_moments_list.append(hu_moments)
+            image_paths.append(img_path)
+    labels = [label] * len(hu_moments_list)
+    return np.array(hu_moments_list), labels, image_paths
+
+# Load Hu moments
+hu_can, labels_can, paths_can = load_images_and_compute_hu_moments(CAN_DIR, 1)
+hu_cannot, labels_cannot, paths_cannot = load_images_and_compute_hu_moments(CANNOT_HOLD_DIR, 0)
+
+hu_moments = np.vstack((hu_can, hu_cannot))
+labels = np.array(labels_can + labels_cannot)
+image_paths = paths_can + paths_cannot
+
+print(f"Loaded {len(hu_moments)} images. Hu moments shape: {hu_moments.shape}")
+
+# Create DataFrame for easy handling and charts
+hu_df = pd.DataFrame(hu_moments, columns=[f'Hu_{i+1}' for i in range(7)])
+hu_df['label'] = labels
+hu_sns_path = os.path.join(CHART_DIR, f'hu_moments_pairplot_{current_date}.png')
+sns.pairplot(hu_df, hue="label", vars=[f"Hu_{i+1}" for i in range(7)])
+plt.savefig(hu_sns_path, dpi=600)
+plt.show()
+
+# # === PCA on Hu moments ===
+pca = PCA(n_components=3)
+pca_features = pca.fit_transform(hu_moments)
+print(f"Explained variance ratio: {pca.explained_variance_ratio_}")
+
+# Plot PCA scatter (2D for simplicity, using PC1 and PC2)
+pca_df = pd.DataFrame(pca_features, columns=['PC1', 'PC2', 'PC3'])
+pca_df['label'] = labels
+plt.figure(figsize=(8, 6))
+sns.scatterplot(data=pca_df, x='PC1', y='PC2', hue='label', palette='viridis')
+plt.title('PCA of Hu Moments (3 Components, Projected to 2D)')
+plt.tight_layout()
+
+# Save plot
+pca_plot_path = os.path.join(CHART_DIR, f'pca_scatter_{current_date}.png')
+plt.savefig(pca_plot_path, dpi=600)
+plt.show()
+
+
+# === ResNet Feature Extraction ===
 transform = transforms.Compose([
+    transforms.ToPILImage(),
     transforms.Resize(256),
     transforms.CenterCrop(224),
     transforms.ToTensor(),
@@ -22,232 +84,192 @@ transform = transforms.Compose([
                          std=[0.229, 0.224, 0.225])
 ])
 
-# ────────────────────────────────────────────────
-# 2. Load dataset (assuming folders: Dataset/can/ and Dataset/cannot_hold/)
-# ────────────────────────────────────────────────
-dataset_root = 'Dataset/'
-dataset = torchvision.datasets.ImageFolder(root=dataset_root, transform=transform)
+resnet = models.resnet50(pretrained=True)
+resnet = nn.Sequential(*list(resnet.children())[:-1])  # remove classifier
+resnet.eval()
 
-print("Classes:", dataset.classes)
-print("Class → index mapping:", dataset.class_to_idx)
-print(f"Total images: {len(dataset)}")
+def extract_resnet_features(image_paths):
+    features = []
+    for path in image_paths:
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_tensor = transform(img).unsqueeze(0)
+        with torch.no_grad():
+            feat = resnet(img_tensor).squeeze()
+        features.append(feat.numpy())
+    return np.array(features)
 
-# 80/20 split
-train_size = int(0.8 * len(dataset))
-val_size = len(dataset) - train_size
-train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+resnet_features = extract_resnet_features(image_paths)
+print(f"ResNet features shape: {resnet_features.shape}")
 
-batch_size = 8
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+# === Feature Fusion ===
+combined_features = np.hstack((pca_features, resnet_features))
 
-# ────────────────────────────────────────────────
-# 3. Model: ResNet18 + binary head
-# ────────────────────────────────────────────────
-model = models.resnet18(weights=models.ResNet18_Weights.DEFAULT)
-
-# Replace final layer
-num_ftrs = model.fc.in_features
-model.fc = nn.Linear(num_ftrs, 2)
-
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-model = model.to(device)
-
-# ────────────────────────────────────────────────
-# 4. Differential learning rates
-# ────────────────────────────────────────────────
-base_lr = 5e-4  # full speed for front & back
-lr_middle = base_lr * 0.15  # 15% speed for middle layers
-
-optimizer = optim.Adam([
-    # Front ─ full speed
-    {'params': model.conv1.parameters(), 'lr': base_lr},
-    {'params': model.bn1.parameters(), 'lr': base_lr},
-    {'params': model.layer1.parameters(), 'lr': base_lr},
-
-    # Middle ─ 15% speed
-    {'params': model.layer2.parameters(), 'lr': lr_middle},
-    {'params': model.layer3.parameters(), 'lr': lr_middle},
-
-    # Back ─ full speed
-    {'params': model.layer4.parameters(), 'lr': base_lr},
-    {'params': model.fc.parameters(), 'lr': base_lr},
-], weight_decay=1e-4)
-
-criterion = nn.CrossEntropyLoss()
-
-scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer,
-    mode='min',
-    factor=0.5,
-    patience=4
+# === Train/Test Split ===
+X_train, X_test, y_train, y_test = train_test_split(
+    combined_features, labels, test_size=0.2, random_state=42
 )
 
+# === Dataset Class ===
+class ImageDataset(Dataset):
+    def __init__(self, features, labels):
+        self.features = torch.tensor(features, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.float32)
 
-# ────────────────────────────────────────────────
-# 5. Evaluation function (loss + accuracy + RMSE on probabilities)
-# ────────────────────────────────────────────────
-def evaluate(model, loader, criterion, device):
-    model.eval()
-    val_loss = 0.0
-    correct = 0
-    total = 0
-    all_probs = []
-    all_labels = []
+    def __len__(self):
+        return len(self.labels)
 
-    with torch.no_grad():
-        for inputs, labels in loader:
-            inputs = inputs.to(device)
-            labels = labels.to(device)
-            outputs = model(inputs)
-            loss = criterion(outputs, labels)
-            val_loss += loss.item()
+    def __getitem__(self, idx):
+        return self.features[idx], self.labels[idx]
 
-            probs = F.softmax(outputs, dim=1)[:, 1].cpu().numpy()  # prob of class 1
-            preds = torch.argmax(outputs, dim=1)
+train_loader = DataLoader(ImageDataset(X_train, y_train), batch_size=32, shuffle=True)
+test_loader = DataLoader(ImageDataset(X_test, y_test), batch_size=32, shuffle=False)
+# #
+# # # === Simple MLP Classifier ===
+# class SimpleModel(nn.Module):
+#     def __init__(self, input_dim):
+#         super().__init__()
+#         self.fc1 = nn.Linear(input_dim, 512)
+#         self.fc2 = nn.Linear(512, 256)
+#         self.fc3 = nn.Linear(256, 1)  # binary output
+#
+#     def forward(self, x):
+#         x = torch.relu(self.fc1(x))
+#         x = torch.relu(self.fc2(x))
+#         return self.fc3(x)  # raw logits
+#
+# model = SimpleModel(combined_features.shape[1])
+# criterion = nn.MSELoss()
+# optimizer = optim.Adam(model.parameters(), lr=0.001)
+#
+# # === Training Loop ===
+# epochs = 20
+# for epoch in range(epochs):
+#     model.train()
+#     for features, labels in train_loader:
+#         optimizer.zero_grad()
+#         outputs = model(features).squeeze()
+#         loss = criterion(outputs, labels)
+#         loss.backward()
+#         optimizer.step()
+#     print(f"Epoch {epoch+1}/{epochs} | Loss: {loss.item():.4f}")
+#
+# # === Evaluation ===
+# model.eval()
+# all_probs, all_preds, all_true = [], [], []
+# with torch.no_grad():
+#     for features, labels in test_loader:
+#         logits = model(features).squeeze()
+#         probs = torch.sigmoid(logits)
+#         preds = (probs > 0.5).int()
+#         all_probs.extend(probs.cpu().numpy())
+#         all_preds.extend(preds.cpu().numpy())
+#         all_true.extend(labels.cpu().numpy())
+#
+# acc = accuracy_score(all_true, all_preds)
+# prec = precision_score(all_true, all_preds)
+# rec = recall_score(all_true, all_preds)
+# roc = roc_auc_score(all_true, all_probs)
+#
+# print("\n=== Final Performance Metrics ===")
+# print(f"Accuracy : {acc:.4f}")
+# print(f"Precision: {prec:.4f}")
+# print(f"Recall   : {rec:.4f}")
+# print(f"ROC-AUC  : {roc:.4f}")
 
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
 
-            all_probs.extend(probs)
-            all_labels.extend(labels.cpu().numpy())
+# Simple MLP model
+class SimpleModel(nn.Module):
+    def __init__(self, input_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, 512)
+        self.fc2 = nn.Linear(512, 256)
+        self.fc3 = nn.Linear(256, 1)  # Regression output
 
-    avg_loss = val_loss / len(loader)
-    accuracy = 100.0 * correct / total
-    rmse = np.sqrt(mean_squared_error(all_labels, all_probs))
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = torch.relu(self.fc2(x))
+        return self.fc3(x).squeeze()
 
-    return avg_loss, accuracy, rmse
+model = SimpleModel(combined_features.shape[1])
+criterion = nn.MSELoss()  # For RMSE
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
+# Train
+epochs = 50
 
-# ────────────────────────────────────────────────
-# 6. Training loop — now also collecting train RMSE
-# ────────────────────────────────────────────────
-num_epochs = 25
+train_rmse_history = []
+test_rmse_history = []
+epochs_list = list(range(1, epochs + 1))
 
-train_losses = []
-val_losses = []
-val_accs = []
-val_rmses = []
-train_rmses = []  # ← NEW: for training RMSE curve
-
-print("\nStarting training...\n")
-
-for epoch in range(num_epochs):
+for epoch in range(epochs):
+    # Training phase
     model.train()
-    running_loss = 0.0
+    train_preds = []
+    train_true = []
 
-    for inputs, labels in train_loader:
-        inputs = inputs.to(device)
-        labels = labels.to(device)
-
+    for features, labels in train_loader:
         optimizer.zero_grad()
-        outputs = model(inputs)
+        outputs = model(features)
         loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item()
+        # Collect all predictions to calculate RMSE later
+        train_preds.extend(outputs.detach().cpu().numpy())
+        train_true.extend(labels.cpu().numpy())
 
-    train_loss = running_loss / len(train_loader)
-    train_losses.append(train_loss)
+    # Calculate training RMSE after the whole epoch
+    train_rmse = np.sqrt(mean_squared_error(train_true, train_preds))
+    train_rmse_history.append(train_rmse)
 
-    # ── Compute train RMSE (on probabilities) ────────
+    # Evaluation phase (test set)
     model.eval()
-    train_probs = []
-    train_labels_list = []
+    test_preds = []
+    test_true = []
     with torch.no_grad():
-        for t_inputs, t_labels in train_loader:
-            t_inputs = t_inputs.to(device)
-            t_outputs = model(t_inputs)
-            t_probs = F.softmax(t_outputs, dim=1)[:, 1].cpu().numpy()  # prob of class 1
-            train_probs.extend(t_probs)
-            train_labels_list.extend(t_labels.cpu().numpy())
+        for features, labels in test_loader:
+            outputs = model(features)
+            test_preds.extend(outputs.cpu().numpy())
+            test_true.extend(labels.cpu().numpy())
 
-    train_rmse = np.sqrt(mean_squared_error(train_labels_list, train_probs))
-    train_rmses.append(train_rmse)
-    model.train()  # back to training mode
+    test_rmse = np.sqrt(mean_squared_error(test_true, test_preds))
+    test_rmse_history.append(test_rmse)
 
-    # Validation
-    val_loss, val_acc, val_rmse = evaluate(model, val_loader, criterion, device)
-    val_losses.append(val_loss)
-    val_accs.append(val_acc)
-    val_rmses.append(val_rmse)
+    # Print progress
+    print(f"Epoch {epoch+1:3d}/{epochs} | Train RMSE: {train_rmse:.6f} | Test RMSE: {test_rmse:.6f}")
 
-    print(f"Epoch {epoch + 1:2d}/{num_epochs} | "
-          f"Train Loss: {train_loss:.4f} | Train RMSE: {train_rmse:.4f} | "
-          f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:5.1f}% | Val RMSE: {val_rmse:.4f}")
+print(f"\nFinal Test RMSE: {test_rmse_history[-1]:.6f}")
 
-    current_lrs = [f"{g['lr']:.2e}" for g in optimizer.param_groups]
-    print(f"   LRs: {current_lrs}")
+# === Plotting the learning curve ===
+plt.figure(figsize=(10, 6))
 
-    scheduler.step(val_loss)
+plt.plot(epochs_list, train_rmse_history, marker='o', linestyle='-', color='blue', label='Training RMSE')
+plt.plot(epochs_list, test_rmse_history, marker='D', linestyle='-', color='orange', label='Testing RMSE')
 
-# ────────────────────────────────────────────────
-# 7. Save model
-# ────────────────────────────────────────────────
-models_dir = "Models"
-os.makedirs(models_dir, exist_ok=True)
+plt.fill_between(epochs_list,
+                 train_rmse_history,
+                 test_rmse_history,
+                 color='gray', alpha=0.12)
 
-timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H")
-model_filename = f"can_hold_model_{timestamp}.pth"
-model_path = os.path.join(models_dir, model_filename)
-
-torch.save(model.state_dict(), model_path)
-print(f"\nModel saved → {model_path}")
-
-print(model)
-
-# ────────────────────────────────────────────────
-# 8. Plot RMSE vs Epochs with shading + auto-save
-# ────────────────────────────────────────────────
-
-
-# Create folder if needed
-charts_dir = "Charts"
-os.makedirs(charts_dir, exist_ok=True)
-
-# Timestamp for filename
-timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-save_path = os.path.join(charts_dir, f"rmse_vs_epochs_{timestamp}.png")
-
-# ── Plot ─────────────────────────────────────────
-fig, ax = plt.subplots(figsize=(10, 6))
-
-epochs_range = list(range(1, num_epochs + 1))
-
-# Training RMSE
-ax.plot(epochs_range, train_rmses, 'o-', color='blue', label='Training RMSE',
-        linewidth=1.6, markersize=5, alpha=0.9)
-ax.fill_between(epochs_range,
-                np.array(train_rmses) - 0.012,
-                np.array(train_rmses) + 0.012,
-                color='blue', alpha=0.11)
-
-# Validation RMSE
-ax.plot(epochs_range, val_rmses, 'D-', color='orange', label='Validation RMSE',
-        linewidth=1.6, markersize=5, alpha=0.9)
-ax.fill_between(epochs_range,
-                np.array(val_rmses) - 0.015,
-                np.array(val_rmses) + 0.015,
-                color='orange', alpha=0.11)
-
-ax.set_xlabel('Epoch')
-ax.set_ylabel('RMSE')
-ax.set_title('Training & Validation RMSE vs Epochs')
-ax.legend(loc='upper right', fontsize=10)
-ax.grid(True, linestyle='--', alpha=0.35)
-
-# Nice y-limit (adjust multiplier if your values are very different)
-max_rmse = max(max(train_rmses), max(val_rmses))
-ax.set_ylim(0, max_rmse * 1.25 if max_rmse > 0 else 0.2)
+plt.title('Training vs Testing RMSE over Epochs', fontsize=14)
+plt.xlabel('Epoch', fontsize=12)
+plt.ylabel('RMSE', fontsize=12)
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.legend(fontsize=11)
 
 plt.tight_layout()
 
-# Save high-res
-plt.savefig(save_path, dpi=160, bbox_inches='tight')
-print(f"RMSE plot saved → {save_path}")
-
-# Show (comment out if you run in non-interactive env)
+# Save the plot
+learning_curve_path = os.path.join(CHART_DIR, f'rmse_vs_epochs_{current_date}.png')
+plt.savefig(learning_curve_path, dpi=600, bbox_inches='tight')
 plt.show()
 
-print("Done!")
+
+
+# # Save RMSE to file
+# rmse_path = os.path.join(chart_dir, f'rmse_{current_date}.txt')
+# with open(rmse_path, 'w') as f:
+#     f.write(f"RMSE: {rmse:.4f}\n")
