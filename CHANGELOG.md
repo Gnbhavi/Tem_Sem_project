@@ -12,3 +12,4 @@ This file tracks weekly progress, features completed, and milestones.
 - Streamlit: Sample webpage design is done
 - Basic Model Creation: We have created a base model with resnet, its the base
 - Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu
+- Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu
