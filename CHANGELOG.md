@@ -17,3 +17,4 @@ This file tracks weekly progress, features completed, and milestones.
 - Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu
 - Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu
 
+- Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu

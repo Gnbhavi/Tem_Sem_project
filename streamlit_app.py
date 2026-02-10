@@ -33,10 +33,10 @@ with tab2:
 
     # --- Graph 3: PCA comparison ---
     st.subheader("PCA Comparison")
-    st.image("Charts/pca_scatter_2026-02-04.png",
+    st.image("Charts/pca_scatter_2026-02-09.png",
              caption="PCA projection comparison", width=800)
 
     st.subheader("Scatter plot")
     # Example placeholder
-    st.image("Charts/hu_moments_pairplot_2026-02-04.png", caption="RMSE over iterations", width=800)
+    st.image("Charts/hu_moments_pairplot_2026-02-09.png", caption="RMSE over iterations", width=800)
 
