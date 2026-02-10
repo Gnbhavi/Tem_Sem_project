@@ -9,3 +9,11 @@ This file tracks weekly progress, features completed, and milestones.
 - Checking commits before the project for branches
 - Added a git hook for "CHANGELOG"
 - THe hooks are added to automate my CHANGELOG.md file
+- Merge branch 'master' of https://github.com/Gnbhavi/Tem_Sem_project
+
+
+- Streamlit: Sample webpage design is done
+- Basic Model Creation: We have created a base model with resnet, its the base
+- Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu
+- Hu Moments: Hu moments are created and a model with hu moments is being used to predict it. models_with_hu
+
